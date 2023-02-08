@@ -5,9 +5,17 @@ using Hl7.Fhir.Model;
 using Hl7.Fhir.Rest;
 using Hl7.Fhir.Serialization;
 
+// connection dic for fire server
+Dictionary<string, string> _fhirServers = new Dictionary<string, string>()
+{
+  { "PublicVonk", "http://server.fire.ly" },
+  { "PublicHAPITW", "https://hapi.fhir.tw/" },
+  { "Local", "http://localhost:8080/fhir" },
+};
 
 // connection var for fire server
-const string _fhirServer = "http://server.fire.ly";
+string _fhirServer = _fhirServers["Local"];
+
 
 // read in settings for following fire server connection
 var settings = new FhirClientSettings
@@ -19,59 +27,168 @@ var settings = new FhirClientSettings
 // creates a new fire client connecting to a fire server defined in var _fhirServer
 var fhirClient = new FhirClient(_fhirServer, settings);
 
-Bundle patientBundle = fhirClient.Search<Patient>(new string[] {"name=Peter"});
+//CreatePatient(fhirClient, "Tom", "Hardy");
 
-int patientNumber = 0;
-List<string> patientsWithEncounters = new List<string>();
+List<Patient> patients = GetPatients(fhirClient);
 
-while (patientBundle != null)
+Console.WriteLine($"Found {patients.Count} patients");
+
+string firstId = null;
+
+//Delete all patients accept first one
+foreach (Patient patient in patients)
 {
-  Console.WriteLine($"Total: {patientBundle.Total} Entry count: {patientBundle.Entry.Count}");
-
-  // list each patient in the bundle
-  foreach (Bundle.EntryComponent entry in patientBundle.Entry)
+  if (firstId == null)
   {
-    if (entry.Resource != null)
+    firstId = patient.Id;
+    continue;
+  }
+  deletePatient(fhirClient, patient.Id);
+}
+
+Patient firstPatient = readPatient(fhirClient, firstId);
+Console.WriteLine($"Read back Patient: {firstPatient.Name[0].ToString()}");
+
+Patient updated = updatePatient(fhirClient, firstPatient);
+
+readPatient(fhirClient, firstId);
+
+//Read a patient from a fire server by ID
+static Patient readPatient(FhirClient fhirClient, string id)
+{
+  if (string.IsNullOrEmpty(id))
+  {
+    throw new ArgumentNullException(nameof(id));
+  }
+
+  Console.WriteLine($"Reading Patient {id}");
+  Patient readPatient = fhirClient.Read<Patient>($"Patient/{id}");
+  return readPatient;
+}
+
+//Update a patient
+static Patient updatePatient(FhirClient fhirClient, Patient patient)
+{
+  patient.Telecom.Add(new ContactPoint(){ 
+    System = ContactPoint.ContactPointSystem.Phone,
+    Value = "555.555.5555",
+    Use = ContactPoint.ContactPointUse.Home
+  });
+
+  patient.Gender = AdministrativeGender.Unknown;
+
+  Patient updatedPatient = fhirClient.Update<Patient>(patient);
+
+  return updatedPatient;
+
+}
+
+static void CreatePatient(FhirClient fhirClient, string familyName, string givenName)
+{
+  Patient patientToCreate = new Patient()
+  {
+    Name = new List<HumanName>()
     {
-      Patient patient = (Patient)entry.Resource;
-
-      Bundle encounterBundle = fhirClient.Search<Encounter>(
-        new string[]
+      new HumanName()
+      {
+        Family = familyName,
+        Given = new List<string>()
         {
-            $"patient=Patient/{patient.Id}",
-        });
-
-      if (encounterBundle.Total == 0)
-      {
-        continue;
+          givenName,
+        },
       }
+    },
+    BirthDateElement = new Date(2002, 07,07)
+  };
 
-      patientsWithEncounters.Add(patient.Id);
+  Patient patientCreated = fhirClient.Create<Patient>(patientToCreate);
+  Console.WriteLine($"ID of created Patient {patientCreated.Id}");
+  
+}
 
-      Console.WriteLine($"- Entry {patientNumber,3}: {entry.FullUrl}");
-      Console.WriteLine($" -   Id: {patient.Id}");
+//Delete a patient specified by ID
+static void deletePatient(FhirClient fhirClient, string id)
+{
+  if (string.IsNullOrEmpty(id))
+  {
+    throw new ArgumentNullException(nameof(id));
+  }
 
-      if (patient.Name.Count > 0)
+  Console.WriteLine($"Deleting patient: {id}");
+  fhirClient.Delete($"Patient/{id}");
+  
+}
+
+//Function to retrieve patients
+static List<Patient> GetPatients(FhirClient fhirClient, string[] patientCriteria = null, int maxPatients = 20, bool onlyWithEncounters = false)
+{
+  List<Patient> patients = new List<Patient>();
+  Bundle patientBundle = new Bundle();
+  if (patientCriteria == null || patientCriteria.Length == 0)
+  {
+    patientBundle = fhirClient.Search<Patient>();
+  }
+  else
+  {
+    patientBundle = fhirClient.Search<Patient>(patientCriteria);
+  }
+
+  while (patientBundle != null)
+  {
+    Console.WriteLine($"Patient Bundle.Total: {patientBundle.Total} Entry count: {patientBundle.Entry.Count}");
+  
+    // list each patient in the bundle
+    foreach (Bundle.EntryComponent entry in patientBundle.Entry)
+    {
+      if (entry.Resource != null)
       {
-        Console.WriteLine($" - Name: {patient.Name[0].ToString()}");
-      }
+        Patient patient = (Patient)entry.Resource;
+  
+        Bundle encounterBundle = fhirClient.Search<Encounter>(
+          new string[]
+          {
+              $"subject=Patient/{patient.Id}",
+          });
+  
+        if (onlyWithEncounters && encounterBundle.Total == 0)
+        {
+          continue;
+        }
+  
+        patients.Add(patient);
+  
+        Console.WriteLine($"- Entry {patients.Count,3}: {entry.FullUrl}");
+        Console.WriteLine($" -   Id: {patient.Id}");
+  
+        if (patient.Name.Count > 0)
+        {
+          Console.WriteLine($" - Name: {patient.Name[0].ToString()}");
+        }
 
-      Console.WriteLine($" - Encounters Total: {encounterBundle.Total} Entry count: {encounterBundle.Entry.Count}");
+        if (encounterBundle.Total > 0)
+        {
+          Console.WriteLine($" - Encounters Total: {encounterBundle.Total} Entry count: {encounterBundle.Entry.Count}");
+        }
+      }
+      
+      if (patients.Count >= maxPatients)
+      {
+        break;
+      }
+      
     }
-
-    patientNumber++;
-
-    if (patientsWithEncounters.Count >= 2)
+  
+    if (patients.Count >= maxPatients)
     {
       break;
     }
+  
+    // get more results
+    patientBundle = fhirClient.Continue(patientBundle);
   }
-
-  if (patientsWithEncounters.Count >= 2)
-  {
-    break;
-  }
-
-  // get more results
-  patientBundle = fhirClient.Continue(patientBundle);
+  
+  return patients;
 }
+
+
+
